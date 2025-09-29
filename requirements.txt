@@ -1,0 +1,10 @@
+﻿pydantic
+uvicorn
+qdrant-client
+python-dotenv
+fastapi
+numpy
+opencv-python
+deepface
+tf-keras
+torch

@@ -134,13 +134,13 @@ def embedding(
     )
 
     target_size = model.input_shape
-    image_path = image_path
+    img = image_path
 
-    if isinstance(image_path, str):
-        pil_image = Image.open(image_path)
-        image_path = numpy.array(pil_image)
+    if isinstance(img, str):
+        pil_image = Image.open(img)
+        img = numpy.array(pil_image)
 
-    balanced_image = _auto_exposure(image_np=image_path)
+    balanced_image = _auto_exposure(image_np=img)
 
     img_objs = detection.extract_faces(
         img_path=balanced_image,
@@ -158,7 +158,6 @@ def embedding(
         # rgb to bgr
         img = img[:, :, ::-1]
 
-        region = img_obj["facial_area"]
         confidence = img_obj["confidence"]
 
         # resize to expected shape of ml model
@@ -175,7 +174,6 @@ def embedding(
         resp_objs.append(
             {
                 "embedding": vectors,
-                "facial_area": region,
                 "face_confidence": confidence,
             }
         )

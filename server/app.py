@@ -24,7 +24,7 @@ async def lifespan(fast_api: FastAPI):
     try:
         logging.info("Connecting to Qdrant Cloud...\n")
 
-        fast_api.qdrant_client = AsyncQdrantClient(
+        fast_api.state.qdrant_client = AsyncQdrantClient(
             url=os.getenv("QDRANT_ENDPOINT"),
             api_key=os.getenv("QDRANT_API"),
         )
@@ -72,7 +72,7 @@ async def lifespan(fast_api: FastAPI):
     try:
         yield
     finally:
-        client = fast_api.qdrant_client
+        client = fast_api.state.qdrant_client
         if client:
             try:
                 await client.close()

@@ -13,7 +13,7 @@ import face_recognition
 
 def get_qdrant_client(request: Request) -> AsyncQdrantClient:
     # Return the qdrant client stored on the FastAPI app instance
-    return request.app.qdrant_client
+    return request.app.state.qdrant_client
 
 
 async def get_embeddings(image: UploadFile = File(...)) -> List[Dict[str, Any]]:

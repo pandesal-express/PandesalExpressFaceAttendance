@@ -3,14 +3,15 @@ import os
 import datetime
 from typing import Any
 import uuid
-
 import httpx
 
 from fastapi import APIRouter, UploadFile, File, Depends, Form, HTTPException, Response
 from qdrant_client import AsyncQdrantClient, models
 
-from .dtos import AuthResponseDto, FaceRegisterRequest
-from .deps import get_qdrant_client, get_embeddings
+from server.deps import INTERNAL_SERVICE_KEY, get_embeddings, get_qdrant_client, verify_internal_request
+from server.dtos import AuthResponseDto, FaceRegisterRequestDto
+from server.utils.jwt_helper import create_signed_jwt
+from server.utils.rsa_keys import rsa_manager
 
 router = APIRouter()
 logging.basicConfig(
@@ -25,11 +26,25 @@ def health_check():
     return {"status": "ok"}
 
 
+@router.get("/internal/jwks")#, dependencies=[Depends(verify_internal_request)])
+async def get_jwks():
+    """
+    Internal endpoint for ASP.NET Core to fetch public keys in JWK format.
+    This endpoint should be protected and only accessible from your backend service.
+    """
+    try:
+        jwks = rsa_manager.get_public_jwk()
+        return jwks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve keys: {str(e)}")
+
+
 @router.post("/api/verify-face")
 async def verify_face(
     response: Response,
     image: UploadFile = File(...),
-    qdrant: AsyncQdrantClient = Depends(get_qdrant_client)
+    time_logged: datetime.datetime = Form(...),
+    qdrant: AsyncQdrantClient = Depends(get_qdrant_client),
 ):
     try:
         embeddings = await get_embeddings(image)
@@ -46,61 +61,19 @@ async def verify_face(
             query=embeddings[0]["embedding"],
             limit=1,
             with_payload=["user_id"],
-            score_threshold=0.8,
+            score_threshold=0.85,
         )
 
         if not qdrantResult.points or len(qdrantResult.points) == 0 or qdrantResult.points[0].payload is None:
             raise HTTPException(status_code=404, detail="No match found. Please register your face.")
 
-        user_id = qdrantResult.points[0].payload['user_id']
+        user_id = qdrantResult.points[0].payload["user_id"]
+        jwt_token = create_signed_jwt(payload={
+            "user_id": user_id,
+            "time_logged": time_logged.isoformat()
+		})
 
-        # If the results have a match, send the user_id to ASP .NET API then send a response back to the frontend
-        async with httpx.AsyncClient() as client:
-            api_url = os.getenv("API_URL")
-            auth_key = os.getenv("AUTH_KEY") # TODO: For dev and testing purposes only, will replace when deploying
-
-            if auth_key is None:
-                raise HTTPException(status_code=500, detail="Auth key not found")
-
-            auth_response = await client.post(
-                url=f"{api_url}/api/Auth/face-login",
-                headers={
-                    "X-Api-Key": auth_key,
-                    "Content-Type": "application/json"
-                },
-                json={"user_id": user_id}
-            )
-
-            if auth_response.status_code not in [200, 201]:
-                raise HTTPException(status_code=auth_response.status_code, detail=auth_response.text)
-            else:
-                # Same data type as AuthResponseDto
-                data: dict[str, Any] = auth_response.json()
-
-        if data['token']:
-            response.set_cookie(
-                key="jwt_token",
-                value=data['token'],
-                expires=datetime.datetime.fromisoformat(data['expiration']),
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                path="/"
-            )
-
-        if data['refreshToken']:
-            response.set_cookie(
-                key="refresh_token",
-                value=data['refreshToken'],
-                expires=datetime.datetime.fromisoformat(data['refreshTokenExpiration']),
-                httponly=True,
-                secure=True,
-                samesite="strict",
-                path="/api/Auth/refresh-token"
-            )
-
-        # Contains {user, token, refresh_token}
-        return AuthResponseDto(**data)
+        return {"jwt_token": jwt_token, "user_id": user_id, "time_logged": time_logged.isoformat()}
     except ValueError as e:
         logging.error(msg=str(e))
         return Response(
@@ -123,7 +96,7 @@ async def verify_face(
 
 @router.post("/api/register-face")
 async def register_face(
-    request: FaceRegisterRequest,
+    request: FaceRegisterRequestDto,
     image: UploadFile = File(...),
     qdrant: AsyncQdrantClient = Depends(get_qdrant_client),
     response: Response = Response()
@@ -131,43 +104,79 @@ async def register_face(
     try:
         embeddings = await get_embeddings(image)
 
+        if len(embeddings) == 0:
+            logging.warning("No face detected in image")
+            raise HTTPException(
+                status_code=400,
+                detail="No face detected. Please ensure your face is clearly visible."
+            )
+
         if len(embeddings) > 1:
-            raise HTTPException(status_code=400, detail="Multiple faces detected")
+            raise HTTPException(
+                status_code=400,
+                detail="Multiple faces detected. Please ensure only one face is in the image."
+            )
 
         is_real = all(i['is_real'] for i in embeddings)
 
         if not is_real:
-            raise HTTPException(status_code=400, detail="Face is not real")
-
-        async with httpx.AsyncClient() as client:
-            api_url = os.getenv("API_URL")
-            auth_key = os.getenv("AUTH_KEY")
-
-            if auth_key is None:
-                raise HTTPException(status_code=500, detail="Auth key not found")
-
-            auth_response = await client.post(
-                url=f"{api_url}/api/Auth/face-register",
-                headers={
-                    "X-Api-Key": auth_key,
-                    "Content-Type": "application/json"
-				},
-                json={
-                    "firstName": request.firstName,
-                    "lastname": request.lastName,
-                    "email": request.email,
-                    "position": request.position,
-                    "departmentId": request.departmentId,
-                    "storeId": request.storeId
-				}
+            raise HTTPException(
+                status_code=400,
+                detail="Liveness check failed. Please use a real face, not a photo or video."
             )
 
-            if auth_response.status_code not in [200, 201]:
-                raise HTTPException(status_code=auth_response.status_code, detail=auth_response.text)
-            else:
-                # Same data type as AuthResponseDto
-                data: dict[str, Any] = auth_response.json()
 
+        existing_face = await qdrant.search(
+			collection_name="faces",
+			query_vector=embeddings[0]['embedding'],
+			limit=1,
+			with_payload=["email"],
+			score_threshold=0.85
+		)
+
+        if existing_face and len(existing_face) > 0 and existing_face[0].payload and existing_face[0].payload["email"] == request.email:
+            raise HTTPException(
+                status_code=400,
+                detail="Face already registered. Please login instead or use a different email."
+            )
+
+        payload = {
+            "firstName": request.firstName,
+            "lastName": request.lastName,
+            "email": request.email,
+            "position": request.position,
+            "departmentId": request.departmentId,
+            "storeId": request.storeId,
+            "timeLogged": request.timeLogged.isoformat()
+        }
+        signed_jwt = create_signed_jwt(payload=payload)
+
+        try:
+            async with httpx.AsyncClient() as client:
+                api_url = os.getenv("API_URL")
+
+                auth_response = await client.post(
+                    url=f"{api_url}/api/Auth/face-register",
+                    headers={
+                        "Authorization": f"Bearer {signed_jwt}",
+                        "X-Internal-Key": INTERNAL_SERVICE_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    json=payload
+                )
+
+                if auth_response.status_code not in [200, 201]:
+                    raise HTTPException(status_code=auth_response.status_code, detail=auth_response.text)
+                else:
+                    # Same data type as AuthResponseDto
+                    data: dict[str, Any] = auth_response.json()
+
+        except httpx.TimeoutException as e:
+            logging.error(f"Failed to register face: {e}")
+            raise HTTPException(status_code=504, detail="Registration service is unavailable. Please try again later.")
+        except httpx.RequestError as e:
+            logging.error(f"Failed to connect to auth service: {e}")
+            raise HTTPException(status_code=500, detail="Failed to connect to auth service")
 
 		# Store the embedding in Qdrant with user_id as the id after successful registration
         await qdrant.upsert(
@@ -178,35 +187,12 @@ async def register_face(
 					vector=embeddings[0]['embedding'],
 					payload={
 						"user_id": data['user']['id'],
-						"name": data['user']['firstName'] + " " + data['user']['lastName'],
-						"register_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+						"email": data['user']['email'],
+						"registered_at": request.timeLogged.isoformat()
 					}
 				)
 			]
         )
-
-		# Set the cookies if the tokens are present
-        if data['token']:
-            response.set_cookie(
-				key="jwt_token",
-				value=data['token'],
-				expires=datetime.datetime.fromisoformat(data['expiration']),
-				httponly=True,
-				secure=True,
-				samesite="lax",
-				path="/"
-			)
-
-        if data['refreshToken']:
-            response.set_cookie(
-                key="refresh_token",
-                value=data['refreshToken'],
-                expires=datetime.datetime.fromisoformat(data['refreshTokenExpiration']),
-                httponly=True,
-                secure=True,
-                samesite="strict",
-                path="/api/Auth/refresh-token"
-            )
 
         return AuthResponseDto(**data)
     except ValueError as e:

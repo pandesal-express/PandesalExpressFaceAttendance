@@ -23,10 +23,11 @@ class AuthResponseDto(BaseModel):
     expiration: datetime.datetime
     user: EmployeeDto
 
-class FaceRegisterRequest(BaseModel):
+class FaceRegisterRequestDto(BaseModel):
     email: str
     firstName: str
     lastName: str
     position: str
     departmentId: str
+    timeLogged: datetime.datetime
     storeId: Optional[str] = None

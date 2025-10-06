@@ -8,3 +8,7 @@ opencv-python
 deepface
 tf-keras
 torch
+redis
+slowapi
+pyjwt
+jwt

@@ -1,14 +1,17 @@
 ﻿import logging
+import os
 import cv2
 import numpy
 from io import BytesIO
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from fastapi import UploadFile, File, Request, HTTPException
+from fastapi import Header, UploadFile, File, Request, HTTPException
 from PIL import Image
 from qdrant_client import AsyncQdrantClient
 
 import face_recognition
+
+INTERNAL_SERVICE_KEY = os.getenv("INTERNAL_SERVICE_KEY", "")
 
 
 def get_qdrant_client(request: Request) -> AsyncQdrantClient:
@@ -46,3 +49,10 @@ async def get_embeddings(image: UploadFile = File(...)) -> List[Dict[str, Any]]:
     except Exception as e:
         logging.error(msg=f"Error in processing image: {e}")
         raise e
+
+
+def verify_internal_request(x_internal_key: Optional[str] = Header(None)):
+    """Dependency to verify requests from ASP.NET Core service."""
+    if x_internal_key != INTERNAL_SERVICE_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid internal service key")
+    return True

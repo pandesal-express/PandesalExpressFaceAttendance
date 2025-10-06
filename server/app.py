@@ -1,4 +1,5 @@
-﻿import os
+﻿import asyncio
+import os
 import logging
 
 from dotenv import load_dotenv
@@ -8,6 +9,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from contextlib import asynccontextmanager
 from qdrant_client import AsyncQdrantClient
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
+from .utils.rsa_keys import rsa_manager
 
 
 load_dotenv()
@@ -69,8 +76,11 @@ async def lifespan(fast_api: FastAPI):
         logging.error(f"Failed to include routes during lifespan startup: {e}")
         raise e
 
+    rotation_task = asyncio.create_task(rsa_manager.start_rotation())
+
     try:
         yield
+        rotation_task.cancel()
     finally:
         client = fast_api.state.qdrant_client
         if client:
@@ -82,6 +92,16 @@ async def lifespan(fast_api: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Configure Redis for rate limiting
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+app.state.limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["5/minute"],
+    storage_uri=redis_url
+)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore
+
 allowed_origins = os.getenv("ALLOWED_ORIGINS", '').split(",") \
     if os.getenv("APP_ENV") == "production" \
     else os.getenv("ALLOWED_ORIGINS_DEV", '').split(",")
@@ -94,3 +114,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(SlowAPIMiddleware)

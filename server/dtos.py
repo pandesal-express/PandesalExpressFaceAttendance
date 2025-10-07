@@ -1,5 +1,5 @@
 import datetime
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel
 
 
@@ -17,12 +17,6 @@ class EmployeeDto(BaseModel):
     departmentId: Optional[str] = None
     storeId: Optional[str] = None
 
-class AuthResponseDto(BaseModel):
-    token: str
-    refreshToken: Optional[str] = None
-    expiration: datetime.datetime
-    user: EmployeeDto
-
 class FaceRegisterRequestDto(BaseModel):
     email: str
     firstName: str
@@ -31,3 +25,9 @@ class FaceRegisterRequestDto(BaseModel):
     departmentId: str
     timeLogged: datetime.datetime
     storeId: Optional[str] = None
+
+class ApiResponseDto(BaseModel):
+    message: str
+    success: bool
+    statusCode: int
+    data: Optional[dict[str, Any]] = None

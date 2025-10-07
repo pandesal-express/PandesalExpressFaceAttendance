@@ -1,15 +1,14 @@
 ﻿import logging
 import os
-import datetime
 from typing import Any
 import uuid
 import httpx
 
-from fastapi import APIRouter, UploadFile, File, Depends, Form, HTTPException, Response
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Response
 from qdrant_client import AsyncQdrantClient, models
 
 from server.deps import INTERNAL_SERVICE_KEY, get_embeddings, get_qdrant_client, verify_internal_request
-from server.dtos import AuthResponseDto, FaceRegisterRequestDto
+from server.dtos import ApiResponseDto, FaceRegisterRequestDto
 from server.utils.jwt_helper import create_signed_jwt
 from server.utils.rsa_keys import rsa_manager
 
@@ -26,7 +25,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@router.get("/internal/jwks")#, dependencies=[Depends(verify_internal_request)])
+@router.get("/internal/jwks", dependencies=[Depends(verify_internal_request)])
 async def get_jwks():
     """
     Internal endpoint for ASP.NET Core to fetch public keys in JWK format.
@@ -43,7 +42,6 @@ async def get_jwks():
 async def verify_face(
     response: Response,
     image: UploadFile = File(...),
-    time_logged: datetime.datetime = Form(...),
     qdrant: AsyncQdrantClient = Depends(get_qdrant_client),
 ):
     try:
@@ -68,38 +66,37 @@ async def verify_face(
             raise HTTPException(status_code=404, detail="No match found. Please register your face.")
 
         user_id = qdrantResult.points[0].payload["user_id"]
-        jwt_token = create_signed_jwt(payload={
-            "user_id": user_id,
-            "time_logged": time_logged.isoformat()
-		})
+        jwt_token = create_signed_jwt(payload={"user_id": user_id})
 
-        return {"jwt_token": jwt_token, "user_id": user_id, "time_logged": time_logged.isoformat()}
+        return ApiResponseDto(
+            message="Face verified successfully",
+            success=True,
+            statusCode=200,
+            data={
+                "jwt_token": jwt_token,
+                "user_id": user_id
+            }
+        )
     except ValueError as e:
         logging.error(msg=str(e))
-        return Response(
-			status_code=400,
-			content={
-				"message": "Unable to detect face, ensure the face and camera is clear",
-				"success": False
-			}
+        return ApiResponseDto(
+            message="Unable to detect face, ensure the face and camera is clear",
+            success=False,
+            statusCode=400
 		)
     except HTTPException as e:
         logging.error(msg=str(e))
-        return Response(
-            status_code=e.status_code,
-            content={"message": e.detail}
-		)
+        return ApiResponseDto(message=e.detail, success=False, statusCode=e.status_code)
     except Exception as e:
         logging.error(msg=str(e))
-        return Response(status_code=500, content={"message": "Something went wrong. Please try again."})
+        return ApiResponseDto(message="Something went wrong. Please try again.", success=False, statusCode=500)
 
 
 @router.post("/api/register-face")
 async def register_face(
     request: FaceRegisterRequestDto,
     image: UploadFile = File(...),
-    qdrant: AsyncQdrantClient = Depends(get_qdrant_client),
-    response: Response = Response()
+    qdrant: AsyncQdrantClient = Depends(get_qdrant_client)
 ):
     try:
         embeddings = await get_embeddings(image)
@@ -168,7 +165,7 @@ async def register_face(
                 if auth_response.status_code not in [200, 201]:
                     raise HTTPException(status_code=auth_response.status_code, detail=auth_response.text)
                 else:
-                    # Same data type as AuthResponseDto
+                    # Same data type as AuthResponseDto from core service
                     data: dict[str, Any] = auth_response.json()
 
         except httpx.TimeoutException as e:
@@ -194,24 +191,22 @@ async def register_face(
 			]
         )
 
-        return AuthResponseDto(**data)
+        return ApiResponseDto(
+			message="Face registered successfully",
+			success=True,
+			statusCode=200,
+			data=data
+		)
     except ValueError as e:
         logging.error(msg=str(e))
-        return Response(
-			status_code=400,
-			content={
-				"message": "Unable to detect face, ensure the face and camera is clear",
-			}
+        return ApiResponseDto(
+            message="Unable to detect face, ensure the face and camera is clear",
+            success=False,
+            statusCode=400
 		)
     except HTTPException as e:
         logging.error(msg=str(e))
-        return Response(
-			status_code=e.status_code,
-			content={"message": e.detail}
-		)
+        return ApiResponseDto(message=e.detail, success=False, statusCode=e.status_code)
     except Exception as e:
         logging.error(msg=str(e))
-        return Response(
-			status_code=500,
-			content={"message": "Something went wrong. Please try again."}
-		)
+        return ApiResponseDto(message="Something went wrong. Please try again.", success=False, statusCode=500)
